@@ -24,9 +24,9 @@ jobs:
           from datetime import date
 
           FEEDS = {
-              "plf": "https://www.google.fr/alerts/feeds/12677963391557493013/16911975429276077784",
-              "g7": "https://www.google.fr/alerts/feeds/12677963391557493013/18044456110239789222",
-              "apd": "https://www.google.fr/alerts/feeds/12677963391557493013/16911975429276077976"
+              "plf": "https://www.google.com/alerts/feeds/12677963391557493013/16911975429276077784",
+              "g7": "https://www.google.com/alerts/feeds/12677963391557493013/18044456110239789222",
+              "apd": "https://www.google.com/alerts/feeds/12677963391557493013/16911975429276077976"
           }
 
           today = date.today().isoformat()
