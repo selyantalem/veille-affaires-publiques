@@ -1,0 +1,55 @@
+name: Google Alerts to Markdown
+
+on:
+  schedule:
+    - cron: "0 7 * * *"   # tous les jours à 7h (heure UTC)
+  workflow_dispatch:
+
+jobs:
+  fetch-alerts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install feedparser python-dateutil
+
+      - name: Fetch RSS and create markdown
+        run: |
+          python << 'EOF'
+          import feedparser, os
+          from datetime import date
+
+          FEEDS = {
+              "plf": "https://www.google.fr/alerts/feeds/12677963391557493013/16911975429276077784",
+              "g7": "https://www.google.fr/alerts/feeds/12677963391557493013/18044456110239789222",
+              "apd": "https://www.google.fr/alerts/feeds/12677963391557493013/16911975429276077976"
+          }
+
+          today = date.today().isoformat()
+
+          for topic, url in FEEDS.items():
+              feed = feedparser.parse(url)
+              if not feed.entries:
+                  continue
+
+              os.makedirs(topic, exist_ok=True)
+              path = f"{topic}/{today}.md"
+
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(f"# Veille {topic.upper()} – {today}\n\n")
+                  for e in feed.entries[:10]:
+                      f.write(f"- **{e.title}**\n  {e.link}\n\n")
+
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Daily policy monitoring update" || echo "Nothing to commit"
+          git push
