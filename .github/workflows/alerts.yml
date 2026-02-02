@@ -27,7 +27,9 @@ jobs:
           from datetime import date
           from openai import OpenAI
 
-          client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+          # --- Safe API key read (won't crash with unclear errors) ---
+          api_key = os.getenv("OPENAI_API_KEY", "").strip()
+          client = OpenAI(api_key=api_key) if api_key else None
 
           FEEDS = {
               "plf": "https://www.google.com/alerts/feeds/12677963391557493013/16911975429276077784",
@@ -38,7 +40,7 @@ jobs:
           RULES = {
               "g7": {
                   "must": "sommet du G7, diplomatie, chefs d'État, communiqué final, gouvernance internationale, géopolitique, APD, climat, sécurité",
-                  "exclude": "jeux vidéo, gaming, manette, controller, PS5, Xbox, hardware, test produit, e-sport"
+                  "exclude": "jeux vidéo, gaming, manette, controller, PS5, Xbox, hardware, test produit, e-sport, joystick"
               },
               "plf": {
                   "must": "PLF, loi de finances, budget, amendements, Assemblée nationale, Sénat, 49.3, finances publiques",
@@ -50,7 +52,27 @@ jobs:
               }
           }
 
-          def classify(topic, title):
+          # --- Cheap keyword guardrail (works even without IA) ---
+          def keyword_filter(topic: str, title: str) -> tuple[bool, str]:
+              t = (title or "").lower()
+
+              if topic == "g7":
+                  blacklist = ["manette", "controller", "gaming", "ps5", "xbox", "joystick", "jeu vidéo", "jeux vidéo", "accessoire"]
+                  if any(b in t for b in blacklist):
+                      return False, "Hors sujet (gaming/hardware)"
+              return True, "OK (keyword check)"
+
+          # --- AI classifier (optional). If IA fails (quota, etc.) fallback to rules. ---
+          def classify(topic: str, title: str) -> dict:
+              # Always apply keyword hard filter first
+              ok, reason = keyword_filter(topic, title)
+              if not ok:
+                  return {"keep": False, "reason": reason}
+
+              # If no key or no client, keep with fallback (still better than crashing)
+              if client is None:
+                  return {"keep": True, "reason": "Fallback sans IA (clé absente / IA désactivée)"}
+
               prompt = f"""
           Tu fais de la veille affaires publiques.
           Thème: {topic.upper()}
@@ -62,47 +84,70 @@ jobs:
           Réponds STRICTEMENT en JSON:
           {{"keep": true/false, "reason": "phrase courte"}}
           """
-              resp = client.responses.create(
-                  model="gpt-4.1-mini",
-                  input=prompt
-              )
+
               try:
+                  resp = client.responses.create(
+                      model="gpt-4.1-mini",
+                      input=prompt
+                  )
                   return json.loads(resp.output_text)
-              except Exception:
-                  return {"keep": False, "reason": "Erreur parsing IA"}
+              except Exception as e:
+                  # CRITICAL: never fail the workflow
+                  print(f"[WARN] IA indisponible ({type(e).__name__}) → fallback", file=sys.stderr)
+
+                  # Fallback logic:
+                  # - for G7, if it passed keyword filter, keep
+                  # - for others, keep (you can tighten later)
+                  return {"keep": True, "reason": f"Fallback sans IA ({type(e).__name__})"}
 
           today = date.today().isoformat()
 
           for topic, url in FEEDS.items():
               feed = feedparser.parse(url)
-              entries = getattr(feed, "entries", [])
+              entries = getattr(feed, "entries", []) or []
+
+              if not entries:
+                  print(f"[INFO] No RSS entries for {topic}")
+                  continue
 
               kept, dropped = [], []
 
               for e in entries[:20]:
-                  title = getattr(e, "title", "")
-                  link = getattr(e, "link", "")
+                  title = getattr(e, "title", "") or "Untitled"
+                  link = getattr(e, "link", "") or ""
                   result = classify(topic, title)
-                  item = {"title": title, "link": link, "reason": result["reason"]}
-                  (kept if result["keep"] else dropped).append(item)
+                  item = {"title": title, "link": link, "reason": result.get("reason", "")}
+                  (kept if result.get("keep") else dropped).append(item)
 
               os.makedirs(topic, exist_ok=True)
               path = f"{topic}/{today}.md"
 
+              # Simple summary WITHOUT calling IA (robust + free)
               with open(path, "w", encoding="utf-8") as f:
                   f.write(f"# Veille {topic.upper()} – {today}\n\n")
-                  f.write("## 🧠 Résumé du jour (IA)\n")
-                  f.write(f"- {len(kept)} article(s) pertinent(s) identifié(s).\n\n")
+
+                  f.write("## 🧠 Résumé du jour\n")
+                  if kept:
+                      f.write(f"- {len(kept)} article(s) pertinent(s) identifié(s).\n")
+                      f.write("- Voir la liste ci-dessous pour lecture détaillée.\n\n")
+                  else:
+                      f.write("- Aucun article pertinent aujourd’hui.\n\n")
 
                   f.write("## 📰 Articles retenus\n")
-                  for it in kept:
-                      f.write(f"- **{it['title']}**\n  {it['link']}\n  _Pourquoi: {it['reason']}_\n\n")
+                  if kept:
+                      for it in kept[:10]:
+                          f.write(f"- **{it['title']}**\n  {it['link']}\n  _Pourquoi: {it['reason']}_\n\n")
+                  else:
+                      f.write("_Aucun._\n\n")
 
                   f.write("## 🚫 Articles écartés\n")
-                  for it in dropped:
-                      f.write(f"- {it['title']}\n  _Raison: {it['reason']}_\n\n")
+                  if dropped:
+                      for it in dropped[:10]:
+                          f.write(f"- {it['title']}\n  _Raison: {it['reason']}_\n\n")
+                  else:
+                      f.write("_Aucun._\n\n")
 
-              print(f"[OK] {path} écrit (kept={len(kept)}, dropped={len(dropped)})")
+              print(f"[OK] Wrote {path} (kept={len(kept)}, dropped={len(dropped)})")
 
           EOF
 
@@ -111,5 +156,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add .
-          git commit -m "Daily policy monitoring with AI" || echo "Nothing to commit"
+          git commit -m "Daily policy monitoring (robust filter)" || echo "Nothing to commit"
           git push
