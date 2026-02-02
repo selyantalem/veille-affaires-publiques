@@ -43,6 +43,125 @@ jobs:
                   f.write(f"# Veille {topic.upper()} – {today}\n\n")
                   for e in feed.entries[:10]:
                       f.write(f"- **{e.title}**\n  {e.link}\n\n")
+import os, sys, json
+import feedparser
+from datetime import date
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+FEEDS = {
+    "plf": "https://www.google.com/alerts/feeds/12677963391557493013/16911975429276077784",
+    "g7":  "https://www.google.com/alerts/feeds/12677963391557493013/18044456110239789222",
+    "apd": "https://www.google.com/alerts/feeds/12677963391557493013/16911975429276077976"
+}
+
+# Règles simples par thème (tu pourras affiner)
+RULES = {
+    "g7": {
+        "must_be_about": "sommet du G7, diplomatie, chefs d'État, communiqué final, gouvernance internationale, géopolitique, APD, climat, sécurité",
+        "exclude": "jeux vidéo, gaming, manettes, controller, PS5, Xbox, hardware, test produit, e-sport"
+    },
+    "plf": {
+        "must_be_about": "PLF, loi de finances, budget, amendements, Assemblée nationale, Sénat, 49.3, finances publiques, mission APD",
+        "exclude": "promotions, shopping, contenus non budgétaires"
+    },
+    "apd": {
+        "must_be_about": "aide publique au développement, ODA/APD, coopération, bailleurs, budget APD, financement du développement, OCDE CAD",
+        "exclude": "contenus sans lien APD/financement public"
+    }
+}
+
+def classify_item(topic: str, title: str, link: str):
+    prompt = f"""
+Tu fais de la veille affaires publiques.
+Thème: {topic.upper()}
+
+Règle: GARDER uniquement si c'est à propos de: {RULES[topic]['must_be_about']}.
+EXCLURE si c'est à propos de: {RULES[topic]['exclude']}.
+
+Titre: {title}
+Lien: {link}
+
+Réponds STRICTEMENT en JSON:
+{{"keep": true/false, "reason": "une phrase courte"}}
+"""
+    resp = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt
+    )
+    text = resp.output_text.strip()
+    try:
+        data = json.loads(text)
+        return bool(data.get("keep", False)), str(data.get("reason", "")).strip()
+    except Exception as e:
+        print(f"[WARN] JSON parse failed: {e} | raw={text[:200]}", file=sys.stderr)
+        return False, "Réponse IA illisible (drop par sécurité)."
+
+def summarize_day(topic: str, kept_items):
+    if not kept_items:
+        return "Aucun article pertinent détecté aujourd’hui."
+    lines = "\n".join([f"- {it['title']} ({it['link']})" for it in kept_items[:8]])
+    prompt = f"""
+À partir de la liste ci-dessous, fais un résumé du jour en FRANÇAIS:
+- 3 puces max
+- neutre et factuel
+- orienté policy (pas de blabla)
+
+Thème: {topic.upper()}
+Articles:
+{lines}
+"""
+    resp = client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt
+    )
+    return resp.output_text.strip()
+
+today = date.today().isoformat()
+
+for topic, url in FEEDS.items():
+    feed = feedparser.parse(url)
+    entries = getattr(feed, "entries", []) or []
+    if not entries:
+        print(f"[INFO] No RSS entries for {topic}")
+        continue
+
+    kept, dropped = [], []
+
+    for e in entries[:20]:
+        title = getattr(e, "title", "Untitled")
+        link = getattr(e, "link", "")
+        keep, reason = classify_item(topic, title, link)
+        item = {"title": title, "link": link, "reason": reason}
+        (kept if keep else dropped).append(item)
+
+    os.makedirs(topic, exist_ok=True)
+    path = f"{topic}/{today}.md"
+
+    day_summary = summarize_day(topic, kept)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# Veille {topic.upper()} – {today}\n\n")
+
+        f.write("## 🧠 Résumé du jour (IA)\n")
+        f.write(day_summary + "\n\n")
+
+        f.write("## 📰 Articles retenus\n")
+        if kept:
+            for it in kept[:10]:
+                f.write(f"- **{it['title']}**\n  {it['link']}\n  _Pourquoi: {it['reason']}_\n\n")
+        else:
+            f.write("_Aucun._\n\n")
+
+        f.write("## 🚫 Articles écartés\n")
+        if dropped:
+            for it in dropped[:10]:
+                f.write(f"- {it['title']}\n  _Raison: {it['reason']}_\n\n")
+        else:
+            f.write("_Aucun._\n\n")
+
+    print(f"[OK] Wrote {path} (kept={len(kept)}, dropped={len(dropped)})")
 
           EOF
 
